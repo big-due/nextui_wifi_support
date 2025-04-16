@@ -1,0 +1,45 @@
+#!/bin/sh
+#
+# NextUI WiFi 'wifi_wpa_cli_event_udhcpc' for tg5040
+# Starts and stops udhcpc DHCP client based on wpa_cli events
+# Version 0.0.1
+#
+# Exit codes
+# 0 - Success
+# 1 - Failure
+
+INTERFACE="wlan0"
+RETRIES=10
+
+
+# ********** wpa_cli Event udhcpc Manager **********
+
+echo "Starting wpa_cli event handler for udhcpc with interface: $1 and event: $2"
+
+[ "$1" = "$INTERFACE" ] || { echo "Interface mismatch: expected $INTERFACE, got $1" >&2; exit 1; }
+
+case "$2" in
+    DISCONNECTED|DEAUTHENTICATED)
+        echo "Stopping udhcpc in wpa_cli event handler..."
+        killall -SIGUSR2 udhcpc 2>/dev/null
+        for i in $(seq 1 "$RETRIES"); do
+            ! ip addr show dev "$INTERFACE" | grep -q "inet " && break
+            echo "Waiting for DHCP leases to be released..."
+            sleep 0.1
+        done
+        killall udhcpc 2>/dev/null
+        echo "Flushing IP address..."
+        ip addr flush dev "$INTERFACE" || { echo "Failed to flush IP address..." >&2; exit 1;}
+        ;;
+    CONNECTED|COMPLETED)
+        echo "Starting udhcpc in wpa_cli event handler..."
+        killall udhcpc 2>/dev/null
+        udhcpc -i "$INTERFACE" -R -b || { echo "Failed to start DHCP client..." >&2; exit 1;}
+        ;;
+    *)
+        echo "Unknown event: $2" >&2
+        exit 1
+        ;;
+esac
+
+echo "Event handling complete."

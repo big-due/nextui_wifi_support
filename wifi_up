@@ -1,0 +1,116 @@
+#!/bin/sh
+#
+# NextUI WiFi 'wifi_up' for tg5040
+# Enables WiFi interface and starts associated services
+# Version 0.0.1
+#
+# Exit codes
+# 0 - Success
+# 1 - Failure
+
+BINS="/mnt/SDCARD/.system/tg5040/bin"
+
+INTERFACE="wlan0"
+RETRIES=10
+
+WPA_SOCKET_DIR="/etc/wifi/sockets"
+WPA_SUPPLICANT_CONF="/etc/wifi/wpa_supplicant.conf"
+WPA_SUPPLICANT_INIT_SCRIPT="/etc/init.d/wpa_supplicant"
+WIFI_IMPORT_CREDENTIALS="$BINS/wifi_import_credentials"
+WPA_CLI_EVENT_UDHCPC_SCRIPT="$BINS/wifi_wpa_cli_event_udhcpc"
+
+# Exit codes
+# 0 - Success
+# 1 - Failure
+
+# Initialize radio hardware
+initialize_wireless() {
+    echo "Initializing WiFi radio..."
+    
+    if rfkill list wifi | grep -q "blocked: yes"; then
+        rfkill unblock wifi || return 1
+        for i in $(seq 1 "$RETRIES"); do
+            echo "Waiting for WiFi radio to be unblocked..."
+            sleep 0.25
+            rfkill list wifi | grep -q "blocked: yes" || return 0
+        done
+        return 1
+    fi
+}
+
+# Initialize wireless network interface
+initialize_interface() {
+    echo "Initializing network interface $INTERFACE..."
+    
+    if ip link show "$INTERFACE" | grep -q "UP"; then
+        echo "Interface $INTERFACE is already up, flushing IP address..."
+        ip addr flush dev "$INTERFACE" || return 1
+    else
+        ip link set "$INTERFACE" up || return 1
+        for i in $(seq 1 "$RETRIES"); do
+            echo "Waiting for interface $INTERFACE to be up..."
+            sleep 0.25
+            ip link show "$INTERFACE" | grep -q "UP" && return 0
+        done
+        return 1
+    fi
+}
+
+# Start WPA supplicant and WPA_CLI services
+start_wpa_services() {
+    echo "Starting network services..."
+    
+    if pgrep -f "S[0-9]*wpa_supplicant" > /dev/null; then
+        echo "The init.d service for wpa_supplicant is starting..."
+    elif pgrep -f "wpa_supplicant" > /dev/null; then
+        echo "Checking already running wpa_supplicant process..."
+        if (wpa_cli -p "$WPA_SOCKET_DIR" -i "$INTERFACE" ping 2>/dev/null | grep -q "PONG") && \
+            (pgrep -f "wpa_supplicant.*$WPA_SUPPLICANT_CONF" >/dev/null); then
+            echo "wpa_supplicant is already running and configured correctly"
+        else
+            echo "wpa_supplicant is already running but not configured correctly, stopping..."
+            "$WPA_SUPPLICANT_INIT_SCRIPT" stop
+            # wait for it to stop on its own before killall
+            for i in $(seq 1 "$RETRIES"); do
+                echo "Waiting for wpa_supplicant to stop..."
+                sleep 0.1
+                pgrep -f "wpa_supplicant" > /dev/null || break
+            done
+            killall wpa_supplicant 2>/dev/null
+            "$WPA_SUPPLICANT_INIT_SCRIPT" start
+        fi
+    else
+        "$WPA_SUPPLICANT_INIT_SCRIPT" start
+    fi
+    
+    for i in $(seq 1 "$RETRIES"); do
+        echo "Waiting for wpa_supplicant to start..."
+        wpa_cli -p "$WPA_SOCKET_DIR" -i "$INTERFACE" ping 2>/dev/null && break
+        sleep 0.25
+    done
+    
+    # Start WPA_CLI with dhcp event script
+    echo "Starting wpa_cli with dhcp event script..."
+    wpa_cli -p "$WPA_SOCKET_DIR" -i "$INTERFACE" -a "$WPA_CLI_EVENT_UDHCPC_SCRIPT" -B || \
+        { echo "Failed to start wpa_cli with dhcp event script"; return 1; }
+    
+    # if udhcpc is not running and wifi is associated, start udhcpc
+    if ! pidof udhcpc > /dev/null && wpa_cli -p "$WPA_SOCKET_DIR" -i "$INTERFACE" status | grep -q "wpa_state=COMPLETED"; then
+        echo "Starting udhcpc..."
+        udhcpc -i "$INTERFACE" -R -b || return 1
+    fi
+    
+}
+
+
+# ********** WiFi Up **********
+
+echo "Starting WiFi up script..."
+
+[ -f "$WIFI_IMPORT_CREDENTIALS" ] && "$WIFI_IMPORT_CREDENTIALS"
+[ -f "$WPA_SUPPLICANT_CONF" ] || exit 1
+[ -d "$WPA_SOCKET_DIR" ] || mkdir -p "$WPA_SOCKET_DIR" || exit 1
+
+initialize_wireless || { echo "Failed to initialize wireless radio" >&2; exit 1; }
+initialize_interface || { echo "Failed to initialize network interface" >&2; exit 1; }
+start_wpa_services || { echo "Failed to start network services" >&2; exit 1; }

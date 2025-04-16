@@ -1,0 +1,107 @@
+#!/bin/sh
+#
+# NextUI WiFi 'wifi_down' for tg5040
+# Stops Wifi services and disables the interface
+# Version 0.0.1
+#
+# Exit codes
+# 0 - Success
+# 1 - Failure
+
+WPA_SUPPLICANT_INIT_SCRIPT="/etc/init.d/wpa_supplicant"
+INTERFACE="wlan0"
+RETRIES=10
+
+exit_code=0
+
+# Stop any running network processes
+stop_network_processes() {
+    echo "Stopping running network processes..."
+    
+    if pidof wpa_cli > /dev/null; then
+        echo "Stopping wpa_cli..."
+        killall wpa_cli 2>/dev/null
+    fi
+    
+    if pidof udhcpc > /dev/null; then
+        echo "Releasing DHCP leases..."
+        killall -SIGUSR2 udhcpc 2>/dev/null
+        for i in $(seq 1 "$RETRIES"); do
+            ! ip addr show dev "$INTERFACE" | grep -q "inet " && break
+            echo "Waiting for DHCP leases to be released..."
+            sleep 0.1
+        done
+        killall udhcpc 2>/dev/null
+    fi
+    
+    if pgrep -f "S[0-9]*wpa_supplicant" > /dev/null; then
+        echo "The init.d service for wpa_supplicant is starting..."
+        for i in $(seq 1 "$RETRIES"); do
+            echo "Waiting for wpa_supplicant init.d service to finish starting..."
+            sleep 0.25
+            pgrep -f "S[0-9]*wpa_supplicant" > /dev/null || break
+        done
+    fi
+    
+    if pgrep -f "wpa_supplicant" > /dev/null; then
+        echo "Stopping wpa_supplicant..."
+        "$WPA_SUPPLICANT_INIT_SCRIPT" stop > /dev/null
+        for i in $(seq 1 "$RETRIES"); do
+            echo "Waiting for wpa_supplicant to stop..."
+            sleep 0.25
+            pgrep -f "wpa_supplicant" > /dev/null || break
+        done
+        killall wpa_supplicant 2>/dev/null
+    fi
+    
+    for proc in wpa_cli udhcpc wpa_supplicant; do
+        if pgrep -f "$proc" > /dev/null; then
+            echo "Forcefully stopping $proc..."
+            killall -9 "$proc" 2>/dev/null
+        fi
+    done
+    
+    if pidof wpa_cli wpa_supplicant udhcpc > /dev/null; then
+        return 1
+    fi
+}
+
+# Disable network interface
+interface_down() {
+    echo "Disabling network interface $INTERFACE..."
+    if ip link show "$INTERFACE" | grep -q "UP"; then
+        ip addr flush dev "$INTERFACE" || echo "Failed to flush IP address..." >&2
+        ip link set "$INTERFACE" down || return 1
+    fi
+}
+
+# Disable WiFi radio hardware
+disable_wireless() {
+    echo "Disabling WiFi radio..."
+    if ! rfkill list wifi | grep -q "blocked: yes"; then
+        rfkill block wifi
+        for i in $(seq 1 "$RETRIES"); do
+            echo "Waiting for WiFi radio to be blocked..."
+            sleep 0.25
+            rfkill list wifi | grep -q "blocked: yes" && return 0
+        done
+        return 1
+    fi
+}
+
+
+# ********** WiFi Down **********
+
+# Stop and disable wifi services and interface
+echo "Stopping WiFi services and disabling interface..."
+
+stop_network_processes || { exit_code=1; echo "Failed to stop running network processes..." >&2; }
+interface_down || { exit_code=1; echo "Failed to disable network interface $INTERFACE..." >&2; }
+disable_wireless || { exit_code=1; echo "Failed to disable WiFi radio..." >&2; }
+
+if [ "$exit_code" -eq 0 ]; then
+    echo "WiFi services stopped and interface disabled successfully."
+else
+    echo "Failed to stop WiFi services and disable interface." >&2
+fi
+exit "$exit_code"
